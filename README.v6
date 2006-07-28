@@ -7,11 +7,13 @@ Most of optional modules are left unchanged, i.e. some of them won't support
 IPv6, and some of them may not compile.
 
 
-CAVEAT: This patchkit may change some of apache module API, to avoid
+CAVEAT: This may patchkit changes some of apache module API, to avoid
 IPv4-dependent structure member variable (like use of u_long to hold
-IPv4 address, or whatever).  Therefore, it is almost impossible for the
-IPv6 patch to be used with other module patches, at the same time
+IPv4 address, or whatever).  Therefore, it is almost impossible for
+the IPv6 patch to be used with other module patches, at the same time
 (including mod_ssl, mod_perl and others).  We have no plan to fix it.
+Due to the reason, we strongly recommened you to switch to apache 2.x,
+which integrate both IPv6 and ssl.
 
 http://www.imasy.or.jp/~ume/ipv6/test/ has an experimental patch against
 mod_ssl, which makes SSL over IPv6 work with the patch.
@@ -160,9 +162,8 @@ Acknowledgements
 		"Chris P. Ross" <cross@eng.us.uu.net>
 
 Author contacts
-	Jun-ichiro itojun Hagino, KAME project
-	 http://www.kame.net/
-	 mailto:core@kame.net
+	Munechika Sumikawa, WIDE project
+	 mailto:sumikawa@don.to
 Linux Port
 	Arkadiusz Miskiewicz, Polish Linux Distribution project (IPv6)
 	 http://www.pld.org.pl/
