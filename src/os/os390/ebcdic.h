@@ -14,7 +14,7 @@
  */
 
 #ifndef EBCDIC_H
-#define EBCDIC_H  "$Id: ebcdic.h 106443 2004-11-24 19:10:19Z nd $"
+#define EBCDIC_H  "$Id: ebcdic.h 395984 2006-04-21 18:40:11Z jim $"
 
 #include <ap_ebcdic.h>
 
