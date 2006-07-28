@@ -31,7 +31,7 @@ API_EXPORT(void) ap_fini_vhost_config(pool *p, server_rec *main_server);
 API_EXPORT(const char *) ap_parse_vhost_addrs(pool *p, const char *hostname, server_rec *s);
 
 /* handle NameVirtualHost directive */
-API_EXPORT_NONSTD(const char *) ap_set_name_virtual_host (cmd_parms *cmd, void *dummy, char *arg);
+API_EXPORT_NONSTD(const char *) ap_set_name_virtual_host (cmd_parms *cmd, void *dummy, char *h, char *p);
 
 /* given an ip address only, give our best guess as to what vhost it is */
 API_EXPORT(void) ap_update_vhost_given_ip(conn_rec *conn);

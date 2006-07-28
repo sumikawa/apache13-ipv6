@@ -1,0 +1,3 @@
+#! /bin/sh
+
+./configure --enable-rule=INET6 --enable-module=proxy $*

@@ -3668,7 +3668,8 @@ static char *lookup_variable(request_rec *r, char *var)
     }
     else if (strcasecmp(var, "REMOTE_PORT") == 0) {
         return ap_psprintf(r->pool, "%d",
-                           ntohs(r->connection->remote_addr.sin_port));
+                           ntohs(((struct sockaddr_in *)&r->connection->remote_addr)->sin_port));
+
     }
     else if (strcasecmp(var, "REMOTE_HOST") == 0) {
         result = (char *)ap_get_remote_host(r->connection,
