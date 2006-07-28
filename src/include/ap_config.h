@@ -374,6 +374,10 @@ typedef int rlim_t;
 #endif
 #ifndef S_IWOTH
 #define S_IWOTH 000002
+#ifndef rlim_t
+typedef int rlim_t;
+#endif
+typedef u_long n_long;
 #endif
 
 #define STDIN_FILENO  0
@@ -1452,6 +1456,70 @@ extern double difftime(time_t time1, time_t time0);
 
 #ifndef ap_wait_t
 #define ap_wait_t int
+#endif
+
+#ifndef INET6
+#define sockaddr_storage	sockaddr
+#define ss_family		sa_family
+#define ss_len			sa_len
+#else
+#include "sockaddr_storage.h"	/* sshida@st.rim.or.jp */
+#endif
+
+#ifndef INET6_ADDRSTRLEN
+#define INET6_ADDRSTRLEN	46
+#endif
+#ifndef INET_ADDRSTRLEN
+#define INET_ADDRSTRLEN		16
+#endif
+#ifndef NI_MAXHOST
+#define NI_MAXHOST		1025
+#endif
+#ifndef NI_MAXSERV
+#define	NI_MAXSERV		32
+#endif
+
+#if defined(NEED_GETADDRINFO) || defined(NEED_GETNAMEINFO)
+/*
+ * minimal definitions for fake getaddrinfo()/getnameinfo().
+ */
+#ifndef EAI_NODATA
+#define EAI_NODATA	1
+#define EAI_MEMORY	2
+#endif
+
+#ifndef AI_PASSIVE
+#define AI_PASSIVE	1
+#define AI_CANONNAME	2
+#define AI_NUMERICHOST	4
+#define NI_NUMERICHOST	8
+#define NI_NAMEREQD	16
+#define NI_NUMERICSERV	32
+#endif
+#endif
+
+#ifdef NEED_GETADDRINFO
+#ifdef NEED_ADDRINFO
+struct addrinfo {
+	int	ai_flags;	/* AI_PASSIVE, AI_CANONNAME */
+	int	ai_family;	/* PF_xxx */
+	int	ai_socktype;	/* SOCK_xxx */
+	int	ai_protocol;	/* 0 or IPPROTO_xxx for IPv4 and IPv6 */
+	size_t	ai_addrlen;	/* length of ai_addr */
+	char	*ai_canonname;	/* canonical name for hostname */
+	struct sockaddr *ai_addr;	/* binary address */
+	struct addrinfo *ai_next;	/* next structure in linked list */
+};
+#endif
+extern char *gai_strerror(int ecode);
+extern void freeaddrinfo(struct addrinfo *ai);
+extern int getaddrinfo(const char *hostname, const char *servname,
+	const struct addrinfo *hints, struct addrinfo **res);
+#endif
+#ifdef NEED_GETNAMEINFO
+extern int getnameinfo(const struct sockaddr *sa, size_t salen,
+	char *host, size_t hostlen, char *serv, size_t servlen,
+	int flag);
 #endif
 
 #ifdef __cplusplus

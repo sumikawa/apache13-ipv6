@@ -33,6 +33,7 @@
 #ifdef WIN32
 #include <float.h>
 #endif
+#include "sa_len.h"
 
 typedef enum {
     NO = 0, YES = 1
@@ -464,6 +465,42 @@ static char *conv_sockaddr_in(struct sockaddr_in *si, char *buf_end, int *len)
     *len = buf_end - p;
     return (p);
 }
+
+
+
+#ifdef INET6
+static char *conv_sockaddr(struct sockaddr *sa, char *buf_end, int *len)
+{
+    char *p = buf_end;
+    char hostnamebuf[MAXHOSTNAMELEN];
+    char portnamebuf[MAXHOSTNAMELEN];
+    char *q;
+    int salen;
+
+#ifndef SIN6_LEN
+    salen = SA_LEN(sa);
+#else
+    salen = sa->sa_len;
+#endif
+    if (getnameinfo(sa, salen, hostnamebuf, sizeof(hostnamebuf),
+	    portnamebuf, sizeof(portnamebuf), NI_NUMERICHOST | NI_NUMERICSERV)) {
+	strcpy(hostnamebuf, "???");
+	strcpy(portnamebuf, "???");
+    }
+    if (strcmp(portnamebuf,"0") == 0)
+	strcpy(portnamebuf, "*");
+    q = portnamebuf + strlen(portnamebuf);
+    while (portnamebuf < q)
+	*--p = *--q;
+    *--p = ':';
+    q = hostnamebuf + strlen(hostnamebuf);
+    while (hostnamebuf < q)
+	*--p = *--q;
+
+    *len = buf_end - p;
+    return (p);
+}
+#endif /*INET6*/
 
 
 
@@ -1014,6 +1051,7 @@ API_EXPORT(int) ap_vformatter(int (*flush_func)(ap_vformatter_buff *),
 		    /* print a struct sockaddr_in as a.b.c.d:port */
 		case 'I':
 		    {
+#ifndef INET6
 			struct sockaddr_in *si;
 
 			si = va_arg(ap, struct sockaddr_in *);
@@ -1022,6 +1060,16 @@ API_EXPORT(int) ap_vformatter(int (*flush_func)(ap_vformatter_buff *),
 			    if (adjust_precision && precision < s_len)
 				s_len = precision;
 			}
+#else
+			struct sockaddr *sa;
+
+			sa = va_arg(ap, struct sockaddr *);
+			if (sa != NULL) {
+			    s = conv_sockaddr(sa, &num_buf[NUM_BUF_SIZE], &s_len);
+			    if (adjust_precision && precision < s_len)
+				s_len = precision;
+			}
+#endif
 			else {
 			    s = S_NULL;
 			    s_len = S_NULL_LEN;

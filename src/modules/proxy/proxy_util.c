@@ -21,6 +21,7 @@
 #include "http_log.h"
 #include "util_uri.h"
 #include "util_date.h"          /* get ap_checkmask() decl. */
+#include "sa_len.h"
 
 static int proxy_match_ipaddr(struct dirconn_entry *This, request_rec *r);
 static int proxy_match_domainname(struct dirconn_entry *This, request_rec *r);
@@ -176,6 +177,7 @@ char *
     int i;
     char *strp, *host, *url = *urlp;
     char *user = NULL, *password = NULL;
+    char *t = NULL, *u = NULL, *v = NULL;
 
     if (url[0] != '/' || url[1] != '/')
         return "Malformed URL";
@@ -214,40 +216,63 @@ char *
         *passwordp = password;
     }
 
-    strp = strrchr(host, ':');
-    if (strp != NULL) {
-        *(strp++) = '\0';
+    v = host;
+    if (*host == '['){
+	u = strrchr(host, ']');
+	if (u){
+	    host++;
+	    *u = '\0';
+	    v = u + 1;
+	}
+    }
+    t = strrchr(v, ':');
+    if (t){
+	*t = '\0';
+	strp = t + 1;
+    }
+    if (strp){
+	for (i=0; strp[i] != '\0'; i++)
+	    if (!ap_isdigit(strp[i]))
+		break;
 
-        for (i = 0; strp[i] != '\0'; i++)
-            if (!ap_isdigit(strp[i]))
-                break;
-
-        /* if (i == 0) the no port was given; keep default */
-        if (strp[i] != '\0') {
-            return "Bad port number in URL";
-        }
+	/* if (i == 0) the no port was given; keep default */
+	if (strp[i] != '\0') {
+	    return "Bad port number in URL";
+	}
         else if (i > 0) {
-            *port = atoi(strp);
-            if (*port > 65535)
-                return "Port number in URL > 65535";
-        }
+	    *port = atoi(strp);
+	    if (*port > 65535)
+		return "Port number in URL > 65535";
+	}
     }
     ap_str_tolower(host);       /* DNS names are case-insensitive */
     if (*host == '\0')
         return "Missing host in URL";
 /* check hostname syntax */
     for (i = 0; host[i] != '\0'; i++)
-        if (!ap_isdigit(host[i]) && host[i] != '.')
-            break;
+	if (!ap_isxdigit(host[i]) && host[i] != '.' && host[i] != ':')
+	    break;
     /* must be an IP address */
 #if defined(WIN32) || defined(NETWARE) || defined(TPF) || defined(BEOS)
     if (host[i] == '\0' && (inet_addr(host) == -1))
+	return "Bad IP address in URL";
 #else
-    if (host[i] == '\0' && (ap_inet_addr(host) == -1 || inet_network(host) == -1))
+    if (host[i] == '\0') {
+	struct addrinfo hints, *res0;
+	int gai;
+	memset(&hints, 0, sizeof(hints));
+	hints.ai_family = PF_UNSPEC;
+	hints.ai_flags = AI_NUMERICHOST;
+	if (gai = getaddrinfo(host, NULL, &hints, &res0)) {
+#if 0
+	    return gai_strerror(gai);
+#else
+	    return "Bad IP address in URL";
 #endif
-    {
-        return "Bad IP address in URL";
+	}
+	freeaddrinfo(res0);
     }
+#endif
 
     *urlp = url;
     *hostp = host;
@@ -1313,22 +1338,45 @@ static int proxy_match_word(struct dirconn_entry *This, request_rec *r)
     return host != NULL && strstr(host, This->name) != NULL;
 }
 
-int ap_proxy_doconnect(int sock, struct sockaddr_in *addr, request_rec *r)
+int ap_proxy_doconnect(int sock, struct sockaddr *addr, request_rec *r)
 {
     int i;
+    int salen;
+    char hbuf[NI_MAXHOST], pbuf[NI_MAXSERV];
+#ifdef NI_WITHSCOPEID
+    const int niflags = NI_NUMERICHOST | NI_NUMERICSERV | NI_WITHSCOPEID;
+#else
+    const int niflags = NI_NUMERICHOST | NI_NUMERICSERV;
+#endif
 
     ap_hard_timeout("proxy connect", r);
+#ifdef HAVE_SOCKADDR_LEN
+    salen = addr->sa_len;
+#else
+    switch (addr->sa_family) {
+    case AF_INET6:
+	salen = sizeof(struct sockaddr_in6);
+	break;
+    default:
+	salen = sizeof(struct sockaddr_in);
+	break;
+    }
+#endif
     do {
-        i = connect(sock, (struct sockaddr *)addr, sizeof(struct sockaddr_in));
+	i = connect(sock,  addr, salen);
 #if defined(WIN32) || defined(NETWARE)
         if (i == SOCKET_ERROR)
             errno = WSAGetLastError();
 #endif                          /* WIN32 */
     } while (i == -1 && errno == EINTR);
     if (i == -1) {
+	if (getnameinfo(addr, salen, hbuf, sizeof(hbuf), pbuf, sizeof(pbuf),
+		niflags) != 0) {
+	    strcpy(hbuf, "?");
+	    strcpy(pbuf, "?");
+	}
         ap_log_rerror(APLOG_MARK, APLOG_ERR, r,
-                      "proxy connect to %s port %d failed",
-                      inet_ntoa(addr->sin_addr), ntohs(addr->sin_port));
+                      "proxy connect to %s port %s failed", hbuf, pbuf);
     }
     ap_kill_timeout(r);
 

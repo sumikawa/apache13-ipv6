@@ -21,6 +21,13 @@ extern "C" {
 #endif
 
 /*
+ * Define APACHE6 so that additional modules depending on Apache can
+ * tell if this a pacthed apache-1.3.*. With this definition apache6
+ * is working together with e.g. the ap-perl module in NetBSD.
+ */
+#define APACHE6 1
+
+/*
  * httpd.h: header for simple (ha! not anymore) http daemon
  */
 
@@ -827,8 +834,8 @@ struct conn_rec {
 
     /* Who is the client? */
 
-    struct sockaddr_in local_addr;	/* local address */
-    struct sockaddr_in remote_addr;	/* remote address */
+    struct sockaddr_storage local_addr;	/* local address */
+    struct sockaddr_storage remote_addr; /* remote address */
     char *remote_ip;		/* Client's IP address */
     char *remote_host;		/* Client's DNS name, if known.
 				 * NULL if DNS hasn't been checked,
@@ -867,8 +874,8 @@ struct conn_rec {
 typedef struct server_addr_rec server_addr_rec;
 struct server_addr_rec {
     server_addr_rec *next;
-    struct in_addr host_addr;	/* The bound address, for this server */
-    unsigned short host_port;	/* The bound port, for this server */
+    struct sockaddr_storage host_addr;	/* The bound address, for this server */
+    unsigned short host_port;	/* The bound port, for this server XXX */
     char *virthost;		/* The name given in <VirtualHost> */
 };
 
@@ -932,7 +939,7 @@ struct server_rec {
 /* These are more like real hosts than virtual hosts */
 struct listen_rec {
     listen_rec *next;
-    struct sockaddr_in local_addr;	/* local IP address and port */
+    struct sockaddr_storage local_addr;	/* local IP address and port */
     int fd;
     int used;			/* Only used during restart */        
 /* more stuff here, like which protocol is bound to the port */
@@ -1102,7 +1109,7 @@ API_EXPORT(int)    ap_checkconv_in(struct request_rec *r); /* for uploads */
 #endif /*#ifdef CHARSET_EBCDIC*/
 
 API_EXPORT(char *) ap_get_local_host(pool *);
-API_EXPORT(unsigned long) ap_get_virthost_addr(char *hostname, unsigned short *port);
+API_EXPORT(struct sockaddr *) ap_get_virthost_addr(char *hostname, unsigned short *port);
 
 extern API_VAR_EXPORT time_t ap_restart_time;
 

@@ -24,6 +24,7 @@
 #include "http_request.h"	/* for sub_req_lookup_uri() */
 #include "util_script.h"
 #include "util_date.h"		/* For parseHTTPdate() */
+#include "sa_len.h"
 
 #ifdef OS2
 #define INCL_DOS
@@ -160,6 +161,7 @@ API_EXPORT(void) ap_add_common_vars(request_rec *r)
     array_header *hdrs_arr = ap_table_elts(r->headers_in);
     table_entry *hdrs = (table_entry *) hdrs_arr->elts;
     int i;
+    char servbuf[NI_MAXSERV];
 
     /* use a temporary table which we'll overlap onto
      * r->subprocess_env later
@@ -251,8 +253,16 @@ API_EXPORT(void) ap_add_common_vars(request_rec *r)
     ap_table_addn(e, "SERVER_ADMIN", s->server_admin);	/* Apache */
     ap_table_addn(e, "SCRIPT_FILENAME", r->filename);	/* Apache */
 
-    ap_table_addn(e, "REMOTE_PORT",
-		  ap_psprintf(r->pool, "%d", ntohs(c->remote_addr.sin_port)));
+    servbuf[0] = '\0';
+    if (!getnameinfo((struct sockaddr *)&c->remote_addr,
+#ifndef HAVE_SOCKADDR_LEN
+		     SA_LEN((struct sockaddr *)&c->remote_addr),
+#else
+		     c->remote_addr.ss_len,
+#endif
+		     NULL, 0, servbuf, sizeof(servbuf), NI_NUMERICSERV)){
+	ap_table_addn(e, "REMOTE_PORT", ap_pstrdup(r->pool, servbuf));
+    }
 
     if (c->user) {
 	ap_table_addn(e, "REMOTE_USER", c->user);

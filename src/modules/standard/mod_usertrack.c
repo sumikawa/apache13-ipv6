@@ -121,7 +121,7 @@ static char * make_cookie_id(char * buffer, int bufsize, request_rec *r,
     long reqtime = (long) r->request_time;
     long clocktime;
 
-    unsigned long ipaddr = ntohl(r->connection->remote_addr.sin_addr.s_addr);
+    unsigned long ipaddr = ntohl(((struct sockaddr_in*)&r->connection->remote_addr)->sin_addr.s_addr);
     const char *rname = ap_get_remote_host(r->connection, r->per_dir_config,
 					   REMOTE_NAME);
     dcfg = ap_get_module_config(r->per_dir_config, &usertrack_module);

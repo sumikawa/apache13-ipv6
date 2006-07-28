@@ -194,6 +194,8 @@ RULE_EXPAT=`./helpers/CutRule EXPAT $file`
 RULE_CYGWIN_WINSOCK=`./helpers/CutRule CYGWIN_WINSOCK $file` 
 RULE_SHARED_CORE=`./helpers/CutRule SHARED_CORE $file`
 RULE_SHARED_CHAIN=`./helpers/CutRule SHARED_CHAIN $file`
+RULE_INET6=`./helpers/CutRule INET6 $file`
+RULE_INET6_V6ONLY=`./helpers/CutRule INET6_V6ONLY $file`
 
 ####################################################################
 ## Rule SHARED_CORE implies required DSO support
@@ -1691,6 +1693,132 @@ if [ "x$RULE_SOCKS5" = "xyes" ]; then
     esac
 fi
 
+# INET6 support.
+if [ "$RULE_INET6" = "yes" ]; then
+    echo " + enabling INET6 support"
+    CFLAGS="$CFLAGS -DINET6"
+    CFLAGS="$CFLAGS -Dss_family=__ss_family -Dss_len=__ss_len"
+    if [ "$RULE_INET6_V6ONLY" = "yes" ]; then
+        echo "   + IPV6_V6ONLY (disable IPv4 mapped address)"
+        CFLAGS="$CFLAGS -DINET6_V6ONLY"
+    fi
+    IPV6_STACKTYPE="UNKNOWN"
+    for i in KAME Linux Solaris; do
+	case "$i" in
+	KAME)
+	    if [ -f /usr/include/netinet6/in6.h -a "x`egrep '__KAME__' /usr/include/netinet6/in6.h 2>/dev/null`" != "x" ]; then
+		IPV6_STACKTYPE=$i
+	    fi
+	    ;;
+	Linux)
+	    if [ /usr/include/netinet/ip6.h -a -d /usr/include/linux ]; then
+		IPV6_STACKTYPE=$i
+	    fi
+	    ;;
+	Solaris)
+	    SOL_VERSION=`(uname -v) 2>/dev/null` || SOL_VERSION="unknown"
+	    case "${PLAT}-${SOL_VERSION}" in
+		*-solaris2.27*-*IPv6*)
+		    if [ -f /etc/hostname -o -f /etc/hostname.[a-z]*[0-9] ]; then
+			IPV6_STACKTYPE="Solaris 7 (${SOL_VERSION})"
+		    fi
+		    ;;
+	    esac
+	    ;;
+	esac
+	if [ "$IPV6_STACKTYPE" != "UNKNOWN" ]; then
+	    break
+	fi
+    done
+    if [ "$IPV6_STACKTYPE" != "UNKNOWN" ]; then
+	echo " + You seem to be using $IPV6_STACKTYPE stack"
+	if ./helpers/TestCompile func getaddrinfo; then
+	    echo "   - Assuming you have working getaddrinfo in libc" 
+	else
+	    if [ -f /usr/local/v6/lib/libinet6.a -a "x`egrep '^EXTRA_L' Makefile.config | grep linet6`" = "x" ]; then
+		LIBS="$LIBS -L/usr/local/v6/lib -linet6"
+		echo "   - using getaddrinfo in libinet6" 
+	    elif [ -f /usr/local/lib/libinet6.a -a "x`egrep '^EXTRA_L' Makefile.config | grep linet6`" = "x" ]; then
+		LIBS="$LIBS -L/usr/local/lib -linet6"
+		echo "   - using getaddrinfo in libinet6"
+	    elif [ -f /usr/inet6/lib/libinet6.a -a "x`egrep '^EXTRA_L' Makefile.config | grep linet6`" = "x" ]; then
+		echo "   - using getaddrinfo in libinet6"
+	    else
+		echo "** WARNING: No getaddrinfo found, linkage may fail" 
+	    fi
+	fi
+    else
+	echo ""
+	echo "** WARNING: We have no explicit knowledge about the IPv6"
+	echo "** implementation on this host.  You may need to specify"
+	echo "** EXTRA_LIBS so that we can find getaddrinfo() and"
+	echo "** getnameinfo() library functions."
+	echo ""
+    fi
+    case $PLAT in
+	*-solaris2* )
+	    LIBS="$LIBS -lresolv"
+	    ;;
+    esac
+else
+  if ./helpers/TestCompile func getaddrinfo; then
+    echo "   - Assuming you have working getaddrinfo in libc"
+  else  
+    CFLAGS="$CFLAGS -DNEED_GETADDRINFO -DNEED_GETNAMEINFO"
+    if [ -f /usr/include/netdb.h -a "x`egrep 'addrinfo' /usr/include/netdb.h`" = "x" ]; then
+	CFLAGS="$CFLAGS -DNEED_ADDRINFO"
+    fi
+  fi
+fi
+
+echo '#include <sys/types.h>' >testfunc.c
+echo '#include <sys/socket.h>' >>testfunc.c
+echo 'int testfunc(){ struct sockaddr sa; int i = sa.sa_len; };' >>testfunc.c
+rm -f testfunc.o
+eval "${MAKE-make} -f Makefile.config testfunc.o >/dev/null 2>/dev/null"
+if [ -f testfunc.o ]; then
+    echo " + you have sa_len in struct sockaddr."
+    CFLAGS="$CFLAGS -DHAVE_SOCKADDR_LEN"
+else
+    echo " + you don't have sa_len in struct sockaddr."
+fi
+rm -f testfunc.c testfunc.o
+
+echo '#include <sys/types.h>' >testfunc.c
+echo '#include <sys/socket.h>' >>testfunc.c
+echo 'struct sockaddr_storage sockaddr_storage;' >>testfunc.c
+rm -f testfunc.o
+eval "${MAKE-make} -f Makefile.config testfunc.o >/dev/null 2>/dev/null"
+if [ -f testfunc.o ]; then
+    echo " + assuming you have struct sockaddr_storage"
+else
+    CFLAGS="$CFLAGS -DNEED_SOCKADDR_STORAGE"
+    echo " + you need struct sockaddr_storage"
+fi
+rm -f testfunc.c testfunc.o
+
+echo '#include <sys/types.h>' >testfunc.c
+echo '#include <sys/socket.h>' >>testfunc.c
+echo 'int testfunc(){ socklen_t t; }' >>testfunc.c
+rm -f testfunc.o
+eval "${MAKE-make} -f Makefile.config testfunc.o >/dev/null 2>/dev/null"
+if [ ! -f testfunc.o ]; then
+    CFLAGS="$CFLAGS -Dsocklen_t=int"
+fi
+rm -f testfunc.c testfunc.o
+
+echo '#include <sys/types.h>' >testfunc.c
+echo '#include <sys/socket.h>' >>testfunc.c
+echo 'struct sockaddr_in sin;' >>testfunc.c
+echo 'int main(){ int i = sin.sin_len; }' >>testfunc.c
+rm -f testfunc.o
+eval "${MAKE-make} -f Makefile.config testfunc.o >/dev/null 2>/dev/null"
+if [ -f testfunc.o ]; then
+    CFLAGS="$CFLAGS -DSIN_LEN"
+fi
+rm -f testfunc.c testfunc.o
+
+
 ####################################################################
 ## Find out what modules we want and try and configure things for them
 ## Module lines can look like this:
@@ -2228,6 +2356,38 @@ echo "/* determine: longest possible integer type */" >>$AP_CONFIG_AUTO_H
 echo "#ifndef AP_LONGEST_LONG" >>$AP_CONFIG_AUTO_H
 echo "#define AP_LONGEST_LONG $AP_LONGEST_LONG" >>$AP_CONFIG_AUTO_H
 echo "#endif" >>$AP_CONFIG_AUTO_H
+
+if [ x`./helpers/TestCompile -r sizeof 'uint32_t'` != x"" ]; then
+    echo "" >>$AP_CONFIG_AUTO_H
+    echo "/* determine: use uint32_t as 32bit unsigned int */" >>$AP_CONFIG_AUTO_H
+    echo "#ifndef ap_uint32_t" >>$AP_CONFIG_AUTO_H
+    echo "#define ap_uint32_t uint32_t" >>$AP_CONFIG_AUTO_H
+    echo "#endif" >>$AP_CONFIG_AUTO_H
+    echo "   - use uint32_t as 32bit unsigned int"
+elif [ x`./helpers/TestCompile -r sizeof 'u_int32_t'` != x"" ]; then
+    echo "" >>$AP_CONFIG_AUTO_H
+    echo "/* determine: use u_int32_t as 32bit unsigned int */" >>$AP_CONFIG_AUTO_H
+    echo "#ifndef ap_uint32_t" >>$AP_CONFIG_AUTO_H
+    echo "#define ap_uint32_t u_int32_t" >>$AP_CONFIG_AUTO_H
+    echo "#endif" >>$AP_CONFIG_AUTO_H
+    echo "   - use u_int32_t as 32bit unsigned int"
+elif [ x`./helpers/TestCompile -r sizeof 'unsigned int'` = x"4" ]; then
+    echo "" >>$AP_CONFIG_AUTO_H
+    echo "/* determine: use unsigned int as 32bit unsigned int */" >>$AP_CONFIG_AUTO_H
+    echo "#ifndef ap_uint32_t" >>$AP_CONFIG_AUTO_H
+    echo "#define ap_uint32_t unsigned int" >>$AP_CONFIG_AUTO_H
+    echo "#endif" >>$AP_CONFIG_AUTO_H
+    echo "   - use unsigned int as 32bit unsigned int"
+elif [ x`./helpers/TestCompile -r sizeof 'unsigned long int'` = x"4" ]; then
+    echo "" >>$AP_CONFIG_AUTO_H
+    echo "/* determine: use unsigned long int as 32bit unsigned int */" >>$AP_CONFIG_AUTO_H
+    echo "#ifndef uint32_t" >>$AP_CONFIG_AUTO_H
+    echo "#define uint32_t unsigned long int" >>$AP_CONFIG_AUTO_H
+    echo "#endif" >>$AP_CONFIG_AUTO_H
+    echo "   - use unsigned long int as 32bit unsigned int"
+else
+    echo "  - Warning: cannot determine what type should we use as 32bit unsigned int"
+fi
 
 ####################################################################
 ## More building ap_config_auto.h

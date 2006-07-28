@@ -115,6 +115,8 @@
 #include <sys/uio.h>
 #endif
 
+#include "sa_len.h"
+
 #endif				/* NO_APACHE_INCLUDES */
 
 #ifdef	USE_SSL
@@ -219,7 +221,7 @@ char cookie[1024],		/* optional cookie line */
      auth[1024],		/* optional (basic/uuencoded)
 				 * authentification */
      hdrs[4096];		/* optional arbitrary headers */
-int port = 80;			/* port number */
+char *port = "80";		/* port number */
 
 int use_html = 0;		/* use html in the report */
 char *tablestring;
@@ -256,7 +258,7 @@ struct connection *con;		/* connection array */
 struct data *stats;		/* date for each request */
 
 fd_set readbits, writebits;	/* bits for select */
-struct sockaddr_in server;	/* server addr structure */
+struct sockaddr_storage server;      /* server addr structure */
 
 #ifndef BEOS
 #define ab_close(s) close(s)
@@ -482,7 +484,7 @@ static void output_results(void)
     printf("\r                                                                           \r");
     printf("Server Software:        %s\n", servername);
     printf("Server Hostname:        %s\n", hostname);
-    printf("Server Port:            %d\n", port);
+    printf("Server Port:            %s\n", port);
     printf("\n");
     printf("Document Path:          %s\n", path);
     printf("Document Length:        %d bytes\n", doclen);
@@ -835,7 +837,7 @@ static void start_connect(struct connection * c)
     c->cbx = 0;
     c->gotheader = 0;
 
-    c->fd = socket(AF_INET, SOCK_STREAM, 0);
+    c->fd = socket(server.ss_family, SOCK_STREAM, 0);
     if (c->fd < 0) {
 	what = "SOCKET";
 	goto _bad;
@@ -852,11 +854,16 @@ static void start_connect(struct connection * c)
 
 again:
     gettimeofday(&c->start, 0);
-    if (connect(c->fd, (struct sockaddr *) & server, sizeof(server)) < 0) {
-	if (errno != EINPROGRESS) {
-	    what = "CONNECT";
-	    goto _bad;
-	};
+#ifndef SIN6_LEN
+    if (connect(c->fd, (struct sockaddr *) & server, SA_LEN((struct sockaddr*)&server)) < 0)
+#else
+    if (connect(c->fd, (struct sockaddr *) & server, server.ss_len) < 0)
+#endif
+    {
+        if (errno != EINPROGRESS) {
+            what = "CONNECT";
+            goto _bad;
+        };
     }
     c->state = STATE_CONNECTING;
 
@@ -1166,7 +1173,7 @@ static void test(void)
 	 * perhaps we should NOT send any
 	 * when we are proxying.
 	 */
-	connecthost  = proxyhost;
+	connecthost = proxyhost;
 	connectport = proxyport;
     	url_on_request = fullurl;
     }
@@ -1177,8 +1184,8 @@ static void test(void)
 	 * header; and do not quote a full
 	 * URL in the GET/POST line.
 	 */
-	connecthost  = hostname;
-	connectport = port;
+	connecthost = hostname;
+	connectport = atoi(port);
     	url_on_request = path;
     }
     
@@ -1189,17 +1196,21 @@ static void test(void)
     }
     {
 	/* get server information */
-	struct hostent *he;
-	he = gethostbyname(connecthost);
-	if (!he) {
-	    char theerror[1024];
-	    ap_snprintf(theerror, sizeof(theerror),
+	struct addrinfo hints, *res;
+	int error;
+
+	memset(&hints, 0, sizeof(hints));
+	hints.ai_family = PF_UNSPEC;
+        hints.ai_socktype = SOCK_STREAM;
+	error = getaddrinfo(connecthost, port, &hints, &res);
+	if (error) {
+            char theerror[1024];
+            ap_snprintf(theerror, sizeof(theerror),
                         "Bad hostname: %s\n", connecthost);
-	    err(theerror);
-	}
-	server.sin_family = he->h_addrtype;
-	server.sin_port = htons(connectport);
-	server.sin_addr.s_addr = ((unsigned long *) (he->h_addr_list[0]))[0];
+            err(theerror);
+        }
+	memcpy(&server, res->ai_addr, res->ai_addrlen);
+	freeaddrinfo(res);
     }
 
     con = malloc(concurrency * sizeof(struct connection));
@@ -1387,7 +1398,7 @@ static int parse_url(char * purl)
     if (strlen(purl) > 8 && strncmp(purl, "https://", 8) == 0) {
 	purl += 8;
 	ssl = 1;
-	port = 443;
+	port = "443";
     }
 #else
     if (strlen(purl) > 8 && strncmp(purl, "https://", 8) == 0) {
@@ -1408,13 +1419,13 @@ static int parse_url(char * purl)
     *cp = '\0';
     strcpy(hostname, h);
     if (p != NULL)
-	port = atoi(p);
+        port = strdup(p);
 
     if ((
 #ifdef USE_SSL
-	(ssl != 0) && (port != 443)) || ((ssl == 0) && 
+	(ssl != 0) && (atoi(port) != 443)) || ((ssl == 0) && 
 #endif
-	(port != 80))) 
+	(atoi(port) != 80))) 
    {
 	ap_snprintf(colonport,sizeof(colonport),":%d",port);
    } else {
@@ -1671,3 +1682,7 @@ int main(int argc, char **argv)
 
     exit(0);
 }
+
+#ifdef NEED_GETADDRINFO
+#include "../main/getaddrinfo.c"
+#endif

@@ -84,6 +84,8 @@ int ap_main(int argc, char *argv[]);
 #include <sys/prctl.h>
 #endif
 
+#include "sa_len.h"
+
 #ifdef MULTITHREAD
 /* special debug stuff -- PCS */
 
@@ -209,7 +211,8 @@ API_VAR_EXPORT char *ap_pid_fname=NULL;
 API_VAR_EXPORT char *ap_scoreboard_fname=NULL;
 API_VAR_EXPORT char *ap_lock_fname=NULL;
 API_VAR_EXPORT char *ap_server_argv0=NULL;
-API_VAR_EXPORT struct in_addr ap_bind_address={0};
+API_VAR_EXPORT int ap_default_family = PF_INET;
+API_VAR_EXPORT struct sockaddr_storage ap_bind_address;
 API_VAR_EXPORT int ap_daemons_to_start=0;
 API_VAR_EXPORT int ap_daemons_min_free=0;
 API_VAR_EXPORT int ap_daemons_max_free=0;
@@ -1382,7 +1385,11 @@ static void usage(char *bin)
     fprintf(stderr, "Usage: %s [-D name] [-d directory] [-f file]\n", bin);
 #endif
     fprintf(stderr, "       %s [-C \"directive\"] [-c \"directive\"]\n", pad);
-    fprintf(stderr, "       %s [-v] [-V] [-h] [-l] [-L] [-S] [-t] [-T] [-F]\n", pad);
+    fprintf(stderr, "       %s [-v] [-V] [-h] [-l] [-L] [-S] [-t] [-T] [-F]"
+#ifdef INET6
+			" [-46]"
+#endif
+			"\n", pad);
     fprintf(stderr, "Options:\n");
 #ifdef SHARED_CORE
     fprintf(stderr, "  -R directory     : specify an alternate location for shared object files\n");
@@ -1407,6 +1414,10 @@ static void usage(char *bin)
     fprintf(stderr, "  -T               : run syntax check for config files (without docroot check)\n");
 #ifndef WIN32
     fprintf(stderr, "  -F               : run main process in foreground, for process supervisors\n");
+#endif
+#ifdef INET6
+    fprintf(stderr, "  -4               : assume IPv4 on parsing configuration file\n");
+    fprintf(stderr, "  -6               : assume IPv6 on parsing configuration file\n");
 #endif
 #ifdef WIN32
     fprintf(stderr, "  -n name          : name the Apache service for -k options below;\n");
@@ -3599,11 +3610,13 @@ static int init_suexec(void)
 
 
 static conn_rec *new_connection(pool *p, server_rec *server, BUFF *inout,
-			     const struct sockaddr_in *remaddr,
-			     const struct sockaddr_in *saddr,
+			     const struct sockaddr *remaddr,
+			     const struct sockaddr *saddr,
 			     int child_num)
 {
     conn_rec *conn = (conn_rec *) ap_pcalloc(p, sizeof(conn_rec));
+    char hostnamebuf[MAXHOSTNAMELEN];
+    size_t addr_len;
 
     /* Got a connection structure, so initialize what fields we can
      * (the rest are zeroed out by pcalloc).
@@ -3612,17 +3625,29 @@ static conn_rec *new_connection(pool *p, server_rec *server, BUFF *inout,
     conn->child_num = child_num;
 
     conn->pool = p;
-    conn->local_addr = *saddr;
-    conn->local_ip = ap_pstrdup(conn->pool,
-				inet_ntoa(conn->local_addr.sin_addr));
+#ifndef SIN6_LEN
+    addr_len = SA_LEN(saddr);
+#else
+    addr_len = saddr->sa_len;
+#endif
+    memcpy(&conn->local_addr, saddr, addr_len);
+    getnameinfo((struct sockaddr *)&conn->local_addr, addr_len,
+	hostnamebuf, sizeof(hostnamebuf), NULL, 0, NI_NUMERICHOST);
+    conn->local_ip = ap_pstrdup(conn->pool, hostnamebuf);
     conn->server = server; /* just a guess for now */
     ap_update_vhost_given_ip(conn);
     conn->base_server = conn->server;
     conn->client = inout;
 
-    conn->remote_addr = *remaddr;
-    conn->remote_ip = ap_pstrdup(conn->pool,
-			      inet_ntoa(conn->remote_addr.sin_addr));
+#ifndef SIN6_LEN
+    addr_len = SA_LEN(remaddr);
+#else
+    addr_len = remaddr->sa_len;
+#endif
+    memcpy(&conn->remote_addr, remaddr, addr_len);
+    getnameinfo((struct sockaddr *)&conn->remote_addr, addr_len,
+	hostnamebuf, sizeof(hostnamebuf), NULL, 0, NI_NUMERICHOST);
+    conn->remote_ip = ap_pstrdup(conn->pool, hostnamebuf);
 
     return conn;
 }
@@ -3662,21 +3687,47 @@ static void sock_disable_nagle(int s, struct sockaddr_in *sin_client)
 #define sock_disable_nagle(s, c)	/* NOOP */
 #endif
 
-static int make_sock(pool *p, const struct sockaddr_in *server)
+static int make_sock(pool *p, const struct sockaddr *server)
 {
     int s;
     int one = 1;
-    char addr[512];
+    char addr[INET6_ADDRSTRLEN + 128];
+    char a0[INET6_ADDRSTRLEN];
+    char p0[NI_MAXSERV];
+#ifdef MPE
+    int privport = 0;
+#endif
 
-    if (server->sin_addr.s_addr != htonl(INADDR_ANY))
-	ap_snprintf(addr, sizeof(addr), "address %s port %d",
-		inet_ntoa(server->sin_addr), ntohs(server->sin_port));
-    else
-	ap_snprintf(addr, sizeof(addr), "port %d", ntohs(server->sin_port));
+    switch(server->sa_family){
+    case AF_INET:
+#ifdef INET6
+    case AF_INET6:
+#endif
+      break;
+    default:
+      ap_log_error(APLOG_MARK, APLOG_CRIT, server_conf,
+                   "make_sock: unsupported address family %u", 
+		   server->sa_family);
+      ap_unblock_alarms();
+      exit(1);
+    }
+    
+    getnameinfo(server,
+#ifndef SIN6_LEN
+		SA_LEN(server),
+#else
+		server->sa_len,
+#endif
+		a0, sizeof(a0), p0, sizeof(p0), NI_NUMERICHOST | NI_NUMERICSERV);
+    ap_snprintf(addr, sizeof(addr), "address %s port %s", a0, p0);
+#ifdef MPE
+    if (atoi(p0) < 1024)
+      privport++;
+#endif
 
     /* note that because we're about to slack we don't use psocket */
     ap_block_alarms();
-    if ((s = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP)) == -1) {
+    if ((s = socket(server->sa_family, SOCK_STREAM, IPPROTO_TCP)) == -1) {
 	    ap_log_error(APLOG_MARK, APLOG_CRIT, server_conf,
 		    "make_sock: failed to get a socket for %s", addr);
 
@@ -3734,6 +3785,16 @@ static int make_sock(pool *p, const struct sockaddr_in *server)
 	exit(1);
     }
 #endif
+#if defined(INET6) && defined(INET6_V6ONLY)
+    if (server->sa_family == AF_INET6 && setsockopt(s, IPPROTO_IPV6, IPV6_V6ONLY, (char *) &one, sizeof(int)) < 0) {
+	ap_log_error(APLOG_MARK, APLOG_CRIT, server_conf,
+		    "make_sock: for %s, setsockopt: (IPV6_V6ONLY)", addr);
+	closesocket(s);
+
+	ap_unblock_alarms();
+	exit(1);
+    }
+#endif
 
     sock_disable_nagle(s, NULL);
     sock_enable_linger(s);
@@ -3771,15 +3832,19 @@ static int make_sock(pool *p, const struct sockaddr_in *server)
 
 #ifdef MPE
 /* MPE requires CAP=PM and GETPRIVMODE to bind to ports less than 1024 */
-    if (ntohs(server->sin_port) < 1024)
+    if (privport)
 	GETPRIVMODE();
 #endif
-
-    if (bind(s, (struct sockaddr *) server, sizeof(struct sockaddr_in)) == -1) {
+#ifndef SIN6_LEN
+    if (bind(s, server, SA_LEN(server)) == -1)
+#else
+    if (bind(s, server, server->sa_len) == -1)
+#endif
+    {
 	ap_log_error(APLOG_MARK, APLOG_CRIT, server_conf,
 	    "make_sock: could not bind to %s", addr);
 #ifdef MPE
-	if (ntohs(server->sin_port) < 1024)
+	if (privport)
 	    GETUSERMODE();
 #endif
 
@@ -3788,7 +3853,7 @@ static int make_sock(pool *p, const struct sockaddr_in *server)
 	exit(1);
     }
 #ifdef MPE
-    if (ntohs(server->sin_port) < 1024)
+    if (privport)
 	GETUSERMODE();
 #endif
 
@@ -4003,15 +4068,17 @@ static void setup_listeners(pool *p)
     for (;;) {
 	fd = find_listener(lr);
 	if (fd < 0) {
-	    fd = make_sock(p, &lr->local_addr);
+	    fd = make_sock(p, (struct sockaddr *)&lr->local_addr);
 	}
 	else {
 	    ap_note_cleanups_for_socket_ex(p, fd, 1);
 	}
 	/* if we get here, (fd >= 0) && (fd < FD_SETSIZE) */
-	FD_SET(fd, &listenfds);
-	if (fd > listenmaxfd)
-	    listenmaxfd = fd;
+	if (fd >= 0) {
+	    FD_SET(fd, &listenfds);
+	    if (fd > listenmaxfd)
+		listenmaxfd = fd;
+	}
 	lr->fd = fd;
 	if (lr->next == NULL)
 	    break;
@@ -4331,8 +4398,8 @@ API_EXPORT(void) ap_child_terminate(request_rec *r)
 static void child_main(int child_num_arg)
 {
     NET_SIZE_T clen;
-    struct sockaddr sa_server;
-    struct sockaddr sa_client;
+    struct sockaddr_storage sa_server;
+    struct sockaddr_storage sa_client;
     listen_rec *lr;
 
     /* All of initialization is a critical section, we don't care if we're
@@ -4521,7 +4588,7 @@ static void child_main(int child_num_arg)
 	    usr1_just_die = 0;
 	    for (;;) {
 		clen = sizeof(sa_client);
-		csd = ap_accept(sd, &sa_client, &clen);
+		csd = ap_accept(sd, (struct sockaddr *)&sa_client, &clen);
 		if (csd >= 0 || errno != EINTR)
 		    break;
 		if (deferred_die) {
@@ -4715,7 +4782,7 @@ static void child_main(int child_num_arg)
 #endif /* NONBLOCK_WHEN_MULTI_LISTEN */
 
 	clen = sizeof(sa_server);
-	if (getsockname(csd, &sa_server, &clen) < 0) {
+	if (getsockname(csd, (struct sockaddr *)&sa_server, &clen) < 0) {
 	    ap_log_error(APLOG_MARK, APLOG_DEBUG, server_conf, 
                          "getsockname, client %pA probably dropped the "
                          "connection", 
@@ -4763,8 +4830,8 @@ static void child_main(int child_num_arg)
 	ap_bpushfd(conn_io, csd, dupped_csd);
 
 	current_conn = new_connection(ptrans, server_conf, conn_io,
-				          (struct sockaddr_in *) &sa_client,
-				          (struct sockaddr_in *) &sa_server,
+				          (struct sockaddr *)&sa_client,
+				          (struct sockaddr *)&sa_server,
 				          my_child_num);
 
 	/*
@@ -4910,12 +4977,13 @@ static int make_child(server_rec *s, int slot, time_t now)
 
 #ifdef _OSD_POSIX
     /* BS2000 requires a "special" version of fork() before a setuid() call */
-    if ((pid = os_fork(ap_user_name)) == -1) {
+    if ((pid = os_fork(ap_user_name)) == -1)
 #elif defined(TPF)
-    if ((pid = os_fork(s, slot)) == -1) {
+    if ((pid = os_fork(s, slot)) == -1)
 #else
-    if ((pid = fork()) == -1) {
+    if ((pid = fork()) == -1)
 #endif
+    {
 	ap_log_error(APLOG_MARK, APLOG_ERR, s, "fork: Unable to fork new process");
 
 	/* fork didn't succeed. Fix the scoreboard or else
@@ -5545,7 +5613,10 @@ int REALMAIN(int argc, char *argv[])
     ap_setup_prelinked_modules();
 
     while ((c = getopt(argc, argv,
-				    "D:C:c:xXd:Ff:vVlLR:StTh"
+				    "D:C:c:xXd:Ff:vVlLR:StTh4"
+#ifdef INET6
+				    "6"
+#endif
 #ifdef DEBUG_SIGSTOP
 				    "Z:"
 #endif
@@ -5625,6 +5696,14 @@ int REALMAIN(int argc, char *argv[])
 	    break;
 	case 'h':
 	    usage(argv[0]);
+	case '4':
+	    ap_default_family = PF_INET;
+	    break;
+#ifdef INET6
+	case '6':
+	    ap_default_family = PF_INET6;
+	    break;
+#endif
 	case '?':
 	    usage(argv[0]);
 	}
@@ -5698,9 +5777,10 @@ int REALMAIN(int argc, char *argv[])
     else {
 	conn_rec *conn;
 	request_rec *r;
-	struct sockaddr sa_server, sa_client;
 	BUFF *cio;
+	struct sockaddr_storage sa_server, sa_client;
 	NET_SIZE_T l;
+	char servbuf[NI_MAXSERV];
 
 	ap_set_version();
 	/* Yes this is called twice. */
@@ -5755,25 +5835,32 @@ int REALMAIN(int argc, char *argv[])
 #endif
 
 	l = sizeof(sa_client);
-	if ((getpeername(sock_in, &sa_client, &l)) < 0) {
+	if ((getpeername(sock_in, (struct sockaddr *)&sa_client, &l)) < 0) {
 /* get peername will fail if the input isn't a socket */
 	    perror("getpeername");
 	    memset(&sa_client, '\0', sizeof(sa_client));
 	}
 
 	l = sizeof(sa_server);
-	if (getsockname(sock_in, &sa_server, &l) < 0) {
+	if (getsockname(sock_in, (struct sockaddr *)&sa_server, &l) < 0) {
 	    perror("getsockname");
 	    fprintf(stderr, "Error getting local address\n");
 	    exit(1);
 	}
-	server_conf->port = ntohs(((struct sockaddr_in *) &sa_server)->sin_port);
+	if (getnameinfo(((struct sockaddr *)&sa_server), l,
+			NULL, 0, servbuf, sizeof(servbuf), 
+			NI_NUMERICSERV)){
+	    fprintf(stderr, "getnameinfo(): family=%d\n", sa_server.ss_family);
+	    exit(1);
+	}
+	servbuf[sizeof(servbuf)-1] = '\0';
+	server_conf->port = atoi(servbuf);
 	cio = ap_bcreate(ptrans, B_RDWR | B_SOCKET);
         cio->fd = sock_out;
         cio->fd_in = sock_in;
 	conn = new_connection(ptrans, server_conf, cio,
-			          (struct sockaddr_in *) &sa_client,
-			          (struct sockaddr_in *) &sa_server, -1);
+			          (struct sockaddr *)&sa_client,
+			          (struct sockaddr *)&sa_server, -1);
 
 	while ((r = ap_read_request(conn)) != NULL) {
 
@@ -7998,7 +8085,11 @@ int main(int argc, char *argv[], char *envp[])
      * but only handle the -L option 
      */
     llp_dir = SHARED_CORE_DIR;
-    while ((c = getopt(argc, argv, "D:C:c:Xd:Ff:vVlLR:SZ:tTh")) != -1) {
+    while ((c = getopt(argc, argv, "D:C:c:Xd:Ff:vVlLR:SZ:tTh4"
+#ifdef INET6
+		"6"
+#endif
+		)) != -1) {
 	switch (c) {
 	case 'D':
 	case 'C':
@@ -8016,6 +8107,10 @@ int main(int argc, char *argv[], char *envp[])
 	case 't':
 	case 'T':
 	case 'h':
+	case '4':
+#ifdef INET6
+	case '6':
+#endif
 	case '?':
 	    break;
 	case 'R':
