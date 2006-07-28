@@ -1186,6 +1186,7 @@ API_EXPORT(request_rec *) ap_read_request(conn_rec *conn)
 
             ap_log_rerror(APLOG_MARK, APLOG_NOERRNO|APLOG_ERR, r,
                          "request failed: URI too long");
+            r->connection->keepalive = 0;
             ap_send_error_response(r, 0);
             ap_log_transaction(r);
             return r;
@@ -1194,6 +1195,7 @@ API_EXPORT(request_rec *) ap_read_request(conn_rec *conn)
             ap_log_rerror(APLOG_MARK, APLOG_NOERRNO|APLOG_ERR, r,
                          "request failed: erroneous characters after protocol string: %s",
 			 ap_escape_logitem(r->pool, r->the_request));
+            r->connection->keepalive = 0;
             ap_send_error_response(r, 0);
             ap_log_transaction(r);
             return r;
@@ -1207,9 +1209,18 @@ API_EXPORT(request_rec *) ap_read_request(conn_rec *conn)
         if (r->status != HTTP_REQUEST_TIME_OUT) {
             ap_log_rerror(APLOG_MARK, APLOG_NOERRNO|APLOG_ERR, r,
                          "request failed: error reading the headers");
+            r->connection->keepalive = 0;
             ap_send_error_response(r, 0);
             ap_log_transaction(r);
             return r;
+        }
+        if (ap_table_get(r->headers_in, "Transfer-Encoding")
+            && ap_table_get(r->headers_in, "Content-Length")) {
+            /* 2616 section 4.4, point 3: "if both Transfer-Encoding
+             * and Content-Length are received, the latter MUST be
+             * ignored"; so unset it here to prevent any confusion
+             * later. */
+            ap_table_unset(r->headers_in, "Content-Length");
         }
     }
     else {
@@ -1260,6 +1271,7 @@ API_EXPORT(request_rec *) ap_read_request(conn_rec *conn)
                       "(see RFC2616 section 14.23): %s", r->uri);
     }
     if (r->status != HTTP_OK) {
+        r->connection->keepalive = 0;
         ap_send_error_response(r, 0);
         ap_log_transaction(r);
         return r;
@@ -1632,12 +1644,15 @@ static void terminate_header(BUFF *client)
     ap_bputs(CRLF, client);  /* Send the terminating empty line */
 }
 
-/* Build the Allow field-value from the request handler method mask.
- * Note that we always allow TRACE, since it is handled below.
+/* Build the Allow header from the request handler method mask.
+ * Note TRACE is tested on a per-server basis.
  */
-static char *make_allow(request_rec *r)
+static void set_allow_header(request_rec *r)
 {
-    return 2 + ap_pstrcat(r->pool,
+    core_server_config *conf =
+        ap_get_module_config(r->server->module_config, &core_module);
+    
+    char *res = ap_pstrcat(r->pool,
                    (r->allowed & (1 << M_GET))       ? ", GET, HEAD" : "",
                    (r->allowed & (1 << M_POST))      ? ", POST"      : "",
                    (r->allowed & (1 << M_PUT))       ? ", PUT"       : "",
@@ -1652,24 +1667,97 @@ static char *make_allow(request_rec *r)
                    (r->allowed & (1 << M_MOVE))      ? ", MOVE"      : "",
                    (r->allowed & (1 << M_LOCK))      ? ", LOCK"      : "",
                    (r->allowed & (1 << M_UNLOCK))    ? ", UNLOCK"    : "",
-                   ", TRACE",
+           (conf->trace_enable != AP_TRACE_DISABLE)  ? ", TRACE"     : "",
                    NULL);
+
+    /* Cowardly attempt to avoid returning an empty Allow: header, 
+     * but no matter how inaccurate, result code 405 demands it.
+     */
+    if (*res)
+        ap_table_setn(r->headers_out, "Allow", res + 2);
+    else if (r->status == METHOD_NOT_ALLOWED)
+        ap_table_setn(r->headers_out, "Allow", "");
 }
 
 API_EXPORT(int) ap_send_http_trace(request_rec *r)
 {
+    core_server_config *conf;
     int rv;
+    int body;
+    char *bodyread, *bodyoff;
+    long bodylen = 0;
+    long bodybuf;
+    long res;
 
     /* Get the original request */
     while (r->prev)
         r = r->prev;
+    conf = ap_get_module_config(r->server->module_config, &core_module);
 
-    if ((rv = ap_setup_client_block(r, REQUEST_NO_BODY)))
+    if (conf->trace_enable == AP_TRACE_DISABLE) {
+        ap_table_setn(r->notes, "error-notes",
+                      "TRACE forbidden by server configuration");
+        ap_table_setn(r->notes, "verbose-error-to", "*");
+        ap_log_rerror(APLOG_MARK, APLOG_ERR|APLOG_NOERRNO, r,
+                      "TRACE forbidden by server configuration");
+	return HTTP_FORBIDDEN;
+    }
+
+    if (conf->trace_enable == AP_TRACE_EXTENDED)
+        body = REQUEST_CHUNKED_PASS;
+    else
+        body = REQUEST_NO_BODY;
+
+    if ((rv = ap_setup_client_block(r, body))) {
+        if (rv == HTTP_REQUEST_ENTITY_TOO_LARGE)
+    	    ap_table_setn(r->notes, "error-notes",
+                          "TRACE with a request body is not allowed");
         return rv;
+    }
+    
+    if (ap_should_client_block(r)) {
+
+        if (r->remaining > 0) {
+            if (r->remaining > 65536) {
+	        ap_table_setn(r->notes, "error-notes",
+                         "Extended TRACE request bodies cannot exceed 64k\n");
+                return HTTP_REQUEST_ENTITY_TOO_LARGE;
+            }
+            /* always 32 extra bytes to catch chunk header exceptions */
+            bodybuf = r->remaining + 32;
+        }
+        else {
+            /* Add an extra 8192 for chunk headers */
+            bodybuf = 73730;
+        }
+
+        bodyoff = bodyread = ap_palloc(r->pool, bodybuf);
+
+        /* only while we have enough for a chunked header */
+        while ((!bodylen || bodybuf >= 32) &&
+               (res = ap_get_client_block(r, bodyoff, bodybuf)) > 0) {
+            bodylen += res;
+            bodybuf -= res;
+            bodyoff += res;
+        }
+        if (res > 0 && bodybuf < 32) {
+            /* discard_rest_of_request_body into our buffer */
+            while (ap_get_client_block(r, bodyread, bodylen) > 0)
+                ;
+	    ap_table_setn(r->notes, "error-notes",
+                     "Extended TRACE request bodies cannot exceed 64k\n");
+            return HTTP_REQUEST_ENTITY_TOO_LARGE;
+        }
+
+        if (res < 0) {
+            return HTTP_BAD_REQUEST;
+        }
+    }
 
     ap_hard_timeout("send TRACE", r);
 
     r->content_type = "message/http";
+
     ap_send_http_header(r);
 #ifdef CHARSET_EBCDIC
     /* Server-generated response, converted */
@@ -1683,6 +1771,10 @@ API_EXPORT(int) ap_send_http_trace(request_rec *r)
     ap_table_do((int (*) (void *, const char *, const char *))
                 ap_send_header_field, (void *) r, r->headers_in, NULL);
     ap_rputs(CRLF, r);
+
+    /* If configured to accept a body, echo the body including chunks */
+    if (bodylen)
+        ap_rwrite(bodyread, bodylen, r);
 
     ap_kill_timeout(r);
     return OK;
@@ -1700,7 +1792,7 @@ API_EXPORT(int) ap_send_http_options(request_rec *r)
     ap_basic_http_header(r);
 
     ap_table_setn(r->headers_out, "Content-Length", "0");
-    ap_table_setn(r->headers_out, "Allow", make_allow(r));
+    set_allow_header(r);
     ap_set_keepalive(r);
 
     ap_table_do((int (*) (void *, const char *, const char *)) ap_send_header_field,
@@ -2030,8 +2122,8 @@ API_EXPORT(int) ap_setup_client_block(request_rec *r, int read_policy)
         }
     }
 
-    if ((r->read_body == REQUEST_NO_BODY) &&
-        (r->read_chunked || (r->remaining > 0))) {
+    if ((r->read_body == REQUEST_NO_BODY)
+        && (r->read_length || r->read_chunked || r->remaining)) {
         ap_log_rerror(APLOG_MARK, APLOG_NOERRNO|APLOG_ERR, r,
                     "%s with body is not allowed for %s", r->method, r->uri);
         return HTTP_REQUEST_ENTITY_TOO_LARGE;
@@ -2837,7 +2929,7 @@ API_EXPORT(void) ap_send_error_response(request_rec *r, int recursive_error)
         }
 
         if ((status == METHOD_NOT_ALLOWED) || (status == NOT_IMPLEMENTED))
-            ap_table_setn(r->headers_out, "Allow", make_allow(r));
+            set_allow_header(r);
 
         ap_send_http_header(r);
 
