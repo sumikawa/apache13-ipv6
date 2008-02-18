@@ -357,7 +357,15 @@ char tpf_server_name[INETD_SERVNAME_LENGTH+1];
 char tpf_mutex_key[TPF_MUTEX_KEY_SIZE];
 #endif /* TPF */
 
+/*
+ * Shared memory scoreboard
+ */
 scoreboard *ap_scoreboard_image = NULL;
+
+/*
+ * Parent process local storage of child pids
+ */
+static int pid_table[HARD_SERVER_LIMIT];
 
 /*
  * Pieces for managing the contents of the Server response header
@@ -373,6 +381,41 @@ enum server_token_type ap_server_tokens = SrvTk_FULL;
 API_VAR_EXPORT int ap_protocol_req_check = 1;
 
 API_VAR_EXPORT int ap_change_shmem_uid = 0;
+
+/*
+ * Check the pid table to see if the actual pid exists
+ */
+
+static int in_pid_table(int pid) {
+    int i;
+    for (i = 0; i < HARD_SERVER_LIMIT; i++) {
+        if (pid_table[i] == pid) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static void set_pid_table(int pid) {
+    int i;
+    for (i = 0; i < HARD_SERVER_LIMIT; i++) {
+        if (pid_table[i] == 0) {
+            pid_table[i] = pid;
+            break;
+        }
+    }
+    /* NOTE: Error detection?? */
+}
+
+static void unset_pid_table(int pid) {
+    int i;
+    for (i = 0; i < HARD_SERVER_LIMIT; i++) {
+        if (pid_table[i] == pid) {
+            pid_table[i] = 0;
+            break;
+        }
+    }
+}
 
 /*
  * This routine is called when the pconf pool is vacuumed.  It resets the
@@ -2656,7 +2699,10 @@ API_EXPORT(int) ap_update_child_status(int child_num, int status, request_rec *r
 	    ss->vhostrec =  r->server;
 	}
     }
-    if (status == SERVER_STARTING && r == NULL) {
+    if (status == SERVER_DEAD) {
+        ap_scoreboard_image->parent[child_num].pid = 0;
+    }
+    else if (status == SERVER_STARTING && r == NULL) {
 	/* clean up the slot's vhostrec pointer (maybe re-used)
 	 * and mark the slot as belonging to a new generation.
 	 */
@@ -2798,9 +2844,15 @@ static void reclaim_child_processes(int terminate)
 	    if (pid == my_pid || pid == 0)
 		continue;
 
+            if (!in_pid_table(pid)) {
+                ap_log_error(APLOG_MARK, APLOG_NOERRNO|APLOG_ERR, server_conf,
+                             "Bad pid (%d) in scoreboard slot %d", pid, i);
+                continue;
+            }
 	    waitret = waitpid(pid, &status, WNOHANG);
 	    if (waitret == pid || waitret == -1) {
 		ap_scoreboard_image->parent[i].pid = 0;
+                unset_pid_table(pid);
 		continue;
 	    }
 	    ++not_dead_yet;
@@ -2898,13 +2950,22 @@ int reap_children(ap_wait_t *status)
 
     for (n = 0; n < max_daemons_limit; ++n) {
         ap_sync_scoreboard_image();
-	if (ap_scoreboard_image->servers[n].status != SERVER_DEAD &&
-		kill((pid = ap_scoreboard_image->parent[n].pid), 0) == -1) {
-	    ap_update_child_status(n, SERVER_DEAD, NULL);
-	    /* just mark it as having a successful exit status */
-	    bzero((char *) status, sizeof(ap_wait_t));
-	    return(pid);
-	}
+        pid = ap_scoreboard_image->parent[n].pid;
+        if (ap_scoreboard_image->servers[n].status != SERVER_DEAD) {
+            if (in_pid_table(pid)) {
+                if (kill(pid, 0) == -1) {
+                    ap_update_child_status(n, SERVER_DEAD, NULL);
+                    /* just mark it as having a successful exit status */
+                    bzero((char *) status, sizeof(ap_wait_t));
+                    unset_pid_table(pid);       /* to be safe */
+                    return(pid);
+                }
+            }
+            else {
+                ap_log_error(APLOG_MARK, APLOG_NOERRNO|APLOG_ERR, server_conf,
+                            "Bad pid (%d) in scoreboard slot %d", pid, n);
+            }
+        }
     }
     return 0;
 }
@@ -2927,15 +2988,21 @@ static int wait_or_timeout(ap_wait_t *status)
 #define MAXWAITOBJ MAXIMUM_WAIT_OBJECTS
     HANDLE h[MAXWAITOBJ];
     int e[MAXWAITOBJ];
-    int round, pi, hi, rv, err;
+    int round, pi, hi, rv, err, pid;
     for (round = 0; round <= (HARD_SERVER_LIMIT - 1) / MAXWAITOBJ + 1; round++) {
 	hi = 0;
 	for (pi = round * MAXWAITOBJ;
 	     (pi < (round + 1) * MAXWAITOBJ) && (pi < HARD_SERVER_LIMIT);
 	     pi++) {
 	    if (ap_scoreboard_image->servers[pi].status != SERVER_DEAD) {
-		e[hi] = pi;
-		h[hi++] = (HANDLE) ap_scoreboard_image->parent[pi].pid;
+                e[hi] = pi;
+                pid = ap_scoreboard_image->parent[pi].pid;
+                if (in_pid_table(pid))
+                    h[hi++] = (HANDLE) pid;
+                else {
+                    ap_log_error(APLOG_MARK, APLOG_NOERRNO|APLOG_ERR, server_conf,
+                                 "Bad pid (%d) in scoreboard slot %d", pid, pi);
+                }
 	    }
 
 	}
@@ -4381,6 +4448,7 @@ static void show_compile_settings(void)
  */
 static void common_init(void)
 {
+    int i;
     INIT_SIGLIST()
 #ifdef AUX3
     (void) set42sig();
@@ -4406,6 +4474,10 @@ static void common_init(void)
     ap_server_pre_read_config  = ap_make_array(pcommands, 1, sizeof(char *));
     ap_server_post_read_config = ap_make_array(pcommands, 1, sizeof(char *));
     ap_server_config_defines   = ap_make_array(pcommands, 1, sizeof(char *));
+    /* overkill since static */
+    for (i = 0; i < HARD_SERVER_LIMIT; i++) {
+        pid_table[i] = 0;
+    }
 }
 
 #ifndef MULTITHREAD
@@ -5055,6 +5127,7 @@ static int make_child(server_rec *s, int slot, time_t now)
     ap_scoreboard_image->parent[slot].last_rtime = now;
 #endif
     ap_scoreboard_image->parent[slot].pid = pid;
+    set_pid_table(pid);
 #ifdef SCOREBOARD_FILE
     lseek(scoreboard_fd, XtOffsetOf(scoreboard, parent[slot]), 0);
     force_write(scoreboard_fd, &ap_scoreboard_image->parent[slot],
@@ -5117,6 +5190,7 @@ static void perform_idle_server_maintenance(void)
     int i;
     int to_kill;
     int idle_count;
+    int pid;
     short_score *ss;
     time_t now = time(NULL);
     int free_length;
@@ -5181,8 +5255,15 @@ static void perform_idle_server_maintenance(void)
 		else if (ps->last_rtime + ss->timeout_len < now) {
 		    /* no progress, and the timeout length has been exceeded */
 		    ss->timeout_len = 0;
-		    kill(ps->pid, SIG_TIMEOUT_KILL);
-		}
+                    pid = ps->pid;
+                    if (in_pid_table(pid)) {
+                        kill(pid, SIG_TIMEOUT_KILL);
+                    }
+                    else {
+                        ap_log_error(APLOG_MARK, APLOG_NOERRNO|APLOG_ERR, server_conf,
+                            "Bad pid (%d) in scoreboard slot %d", pid, i);
+                    }
+                }
 	    }
 #endif
 	}
@@ -5194,11 +5275,18 @@ static void perform_idle_server_maintenance(void)
 	 * while we were counting. Use the define SIG_IDLE_KILL to reflect
 	 * which signal should be used on the specific OS.
 	 */
-	kill(ap_scoreboard_image->parent[to_kill].pid, SIG_IDLE_KILL);
-	idle_spawn_rate = 1;
+        pid = ap_scoreboard_image->parent[to_kill].pid;
+        if (in_pid_table(pid)) {
+            kill(pid, SIG_IDLE_KILL);
+            idle_spawn_rate = 1;
 #ifdef TPF
-        ap_update_child_status(to_kill, SERVER_DEAD, (request_rec *)NULL);
+            ap_update_child_status(to_kill, SERVER_DEAD, (request_rec *)NULL);
 #endif
+        }
+        else {
+            ap_log_error(APLOG_MARK, APLOG_NOERRNO|APLOG_ERR, server_conf,
+                         "Bad pid (%d) in scoreboard slot %d", pid, to_kill);
+        }
     }
     else if (idle_count < ap_daemons_min_free) {
 	/* terminate the free list */
@@ -5445,6 +5533,7 @@ static void standalone_main(int argc, char **argv)
             }
 #endif
 	    if (pid >= 0) {
+		unset_pid_table(pid);
 		process_child_status(pid, status);
 		/* non-fatal death... note that it's gone in the scoreboard. */
 		ap_sync_scoreboard_image();
@@ -5766,7 +5855,7 @@ int REALMAIN(int argc, char *argv[])
     if (!tpf_child) {
         memcpy(tpf_server_name, input_parms.parent.servname,
                INETD_SERVNAME_LENGTH);
-        tpf_server_name[INETD_SERVNAME_LENGTH + 1] = '\0';
+        tpf_server_name[INETD_SERVNAME_LENGTH] = '\0';
         sprintf(tpf_mutex_key, "%.*x", (int) TPF_MUTEX_KEY_SIZE - 1, getpid());
         tpf_parent_pid = getppid();
         ap_open_logs(server_conf, plog);
