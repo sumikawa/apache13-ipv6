@@ -1,12 +1,13 @@
+$Id$
+
 IPv6-ready apache 1.3.x
 	The project site: http://www.don.to/apache13+ipv6/
-$Id$
+	The viewvc URL: http://www.don.to/viewvc/index.cgi/apache13/
+	The latest of the patch: http://www.don.to/arc/
 
 This patchkit enables apache 1.3.x to perform HTTP connection over IPv6.
 Most of optional modules are left unchanged, i.e. some of them won't support
 IPv6, and some of them may not compile.
-
-The latest of the patch is available at http://www.don.to/arc/
 
 CAVEAT: This may patchkit changes some of apache module API, to avoid
 IPv4-dependent structure member variable (like use of u_long to hold
