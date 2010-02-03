@@ -1,5 +1,5 @@
 Apache HTTP Server
-Copyright 2006 The Apache Software Foundation.
+Copyright 2010 The Apache Software Foundation.
 
 This product includes software developed at
 The Apache Software Foundation (http://www.apache.org/).
@@ -19,3 +19,6 @@ Mozilla Public License Version 1.1.
 
 This work includes the regex library Copyright 1992, 1993, 1994 
 Henry Spencer, all rights reserved.
+
+This software contains code derived from UNIX V7, Copyright(C)
+Caldera International Inc.
