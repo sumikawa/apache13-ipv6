@@ -856,7 +856,7 @@ static void fix_hostname(request_rec *r)
 				    goto bad;
 		    }
 		    /* a known "good" port value */
-		    iport = atoi(v);
+		    iport = atoi(port_str);
 		    if (iport < 1 || iport > 65535) {
 			    goto bad;
 		    }
